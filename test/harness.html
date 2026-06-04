@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stepped Funnel Sankey — local synthetic harness</title>
+  <style>
+    body { margin: 0; font-family: 'Google Sans','Roboto',Arial,sans-serif; background: #f5f6f7; color: #202124; }
+    header { padding: 12px 16px; background: #fff; border-bottom: 1px solid #e0e0e0; }
+    header h1 { font-size: 15px; margin: 0 0 4px; }
+    header p { font-size: 12px; margin: 0; color: #5f6368; }
+    .controls { padding: 8px 16px; font-size: 12px; }
+    .controls label { margin-right: 14px; }
+    #viz { width: 96vw; height: 70vh; margin: 12px auto; background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Stepped Funnel Sankey — synthetic data harness</h1>
+    <p>Mounts the viz exactly as Looker would. Flow: order_status &rarr; product_category &rarr; production_status &rarr; print_house_name, weight = item count.</p>
+  </header>
+  <div class="controls">
+    <label>Bucket %: <input id="bucket" type="number" value="5" min="0" max="50" step="1" style="width:54px" /></label>
+    <label>Palette:
+      <select id="palette"><option>looker</option><option>cool</option><option>warm</option><option>mono</option></select>
+    </label>
+    <label><input id="labels" type="checkbox" checked /> labels</label>
+    <label><input id="pcts" type="checkbox" checked /> %</label>
+  </div>
+  <div id="viz"></div>
+
+  <script>
+    // ---- Stub the Looker viz API so the IIFE registers against it ----
+    window.looker = { plugins: { visualizations: { add: function (spec) { window.__SPEC__ = spec; } } } };
+  </script>
+  <script src="../stepped_sankey.js"></script>
+  <script>
+    // ---- synthetic data shaped like Looker's data + queryResponse ----
+    var DIMS = ['order_status', 'product_category', 'production_status', 'print_house_name'];
+    var MEASURE = 'item_count';
+
+    // hand-authored rows: [order_status, product_category, production_status, print_house, count]
+    var RAW = [
+      ['In Production', 'Apparel',   'Printed',  'PSP Berlin', 4200],
+      ['In Production', 'Apparel',   'Printing', 'PSP London', 1800],
+      ['In Production', 'Wall Art',  'Printed',  'PSP Berlin', 2600],
+      ['In Production', 'Wall Art',  'Printed',  'PSP NYC',    1500],
+      ['In Production', 'Cards',     'Printed',  'PSP London', 1300],
+      ['In Production', 'Cards',     'Queued',   'PSP Tokyo',  600],
+      ['In Production', 'Mugs',      'Printing', 'PSP NYC',    900],
+      ['In Production', 'Calendars', 'Queued',   'PSP Sydney', 250],
+      ['In Production', 'Calendars', 'Failed',   'PSP Riga',   60],
+      ['Shipped',       'Apparel',   'Printed',  'PSP Berlin', 3100],
+      ['Shipped',       'Apparel',   'Printed',  'PSP London', 1400],
+      ['Shipped',       'Wall Art',  'Printed',  'PSP NYC',    1700],
+      ['Shipped',       'Cards',     'Printed',  'PSP London', 1100],
+      ['Shipped',       'Mugs',      'Printed',  'PSP NYC',    800],
+      ['Shipped',       'Posters',   'Printed',  'PSP Berlin', 120],
+      ['Delivered',     'Apparel',   'Printed',  'PSP Berlin', 2200],
+      ['Delivered',     'Wall Art',  'Printed',  'PSP NYC',    1300],
+      ['Delivered',     'Cards',     'Printed',  'PSP London', 700],
+      ['Created',       'Apparel',   'Queued',   'PSP Berlin', 500],
+      ['Created',       'Stickers',  'Queued',   'PSP Riga',   90],
+      ['Cancelled',     'Mugs',      'Failed',   'PSP NYC',    140]
+    ];
+
+    function cell(v) { return { value: v, rendered: (typeof v === 'number') ? v.toLocaleString('en-US') : String(v) }; }
+
+    function buildData() {
+      var data = [];
+      for (var i = 0; i < RAW.length; i++) {
+        var row = {};
+        for (var d = 0; d < DIMS.length; d++) { row[DIMS[d]] = cell(RAW[i][d]); }
+        row[MEASURE] = cell(RAW[i][4]);
+        data.push(row);
+      }
+      return data;
+    }
+
+    var queryResponse = {
+      fields: {
+        dimension_like: [
+          { name: 'order_status', label_short: 'Order Status' },
+          { name: 'product_category', label_short: 'Product Category' },
+          { name: 'production_status', label_short: 'Production Status' },
+          { name: 'print_house_name', label_short: 'Print House (PSP)' }
+        ],
+        measure_like: [ { name: 'item_count', label_short: 'Item Count' } ]
+      }
+    };
+
+    var spec = window.__SPEC__;
+    var el = document.getElementById('viz');
+    spec.create(el, {});
+
+    function draw() {
+      var config = {
+        bucket_pct: parseFloat(document.getElementById('bucket').value),
+        palette: document.getElementById('palette').value,
+        show_node_labels: document.getElementById('labels').checked,
+        show_percentages: document.getElementById('pcts').checked,
+        show_values: true
+      };
+      spec.updateAsync(buildData(), el, config, queryResponse, {}, function () {});
+    }
+
+    document.getElementById('bucket').addEventListener('input', draw);
+    document.getElementById('palette').addEventListener('change', draw);
+    document.getElementById('labels').addEventListener('change', draw);
+    document.getElementById('pcts').addEventListener('change', draw);
+    draw();
+  </script>
+</body>
+</html>
