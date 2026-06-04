@@ -371,10 +371,13 @@
       ents[e].push({ order: ord, event: ev });
     }
 
+    var PURE_NUM = /^-?\d+(\.\d+)?$/;
     function orderCmp(a, b) {
-      var na = parseFloat(a.order), nb = parseFloat(b.order);
-      if (!isNaN(na) && !isNaN(nb)) { return na - nb; }
-      var sa = String(a.order), sb = String(b.order);
+      var sa = String(a.order).trim(), sb = String(b.order).trim();
+      // numeric compare only when the WHOLE value is a number — otherwise a
+      // timestamp like "2026-06-03 11:35:26" would parseFloat to 2026 and tie.
+      if (PURE_NUM.test(sa) && PURE_NUM.test(sb)) { return parseFloat(sa) - parseFloat(sb); }
+      // timestamps / ISO dates sort chronologically as strings
       return sa < sb ? -1 : (sa > sb ? 1 : 0);
     }
 
