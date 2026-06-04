@@ -21,7 +21,7 @@
   </header>
   <div class="controls">
     <label>Mode:
-      <select id="mode"><option value="edges">edges (delegation)</option><option value="stepped">stepped (PSP)</option></select>
+      <select id="mode"><option value="edges">edges (delegation)</option><option value="stepped">stepped (PSP)</option><option value="pathfinder">pathfinder (synthetic)</option></select>
     </label>
     <label>Bucket %: <input id="bucket" type="number" value="5" min="0" max="50" step="1" style="width:54px" /></label>
     <label>Palette:
@@ -99,23 +99,52 @@
       });
     }
 
+    // ---- PATHFINDER mode: synthetic event log (entity, seq, event) ----
+    var PATH_QR = {
+      fields: {
+        dimension_like: [
+          { name: 'entity_id', label_short: 'Entity' },
+          { name: 'seq', label_short: 'Seq' },
+          { name: 'event', label_short: 'Event' }
+        ],
+        measure_like: []
+      }
+    };
+    function pathfinderData() {
+      var STAGES = ['Order created','Order created in GN','Plate build triggered','Delegation fires','Delegated order created','Batch release','Printed','Shipped','Tracking synced'];
+      var rows = [];
+      for (var e = 0; e < 300; e++) {
+        var len = 2 + Math.floor(Math.random() * STAGES.length);
+        for (var k = 0; k < len; k++) {
+          var ev = STAGES[k];
+          if (k >= 4 && Math.random() < 0.08) { ev = 'Failed'; }
+          rows.push({ entity_id: cell('e' + e), seq: cell(k), event: cell(ev) });
+          if (ev === 'Failed') { break; }
+        }
+      }
+      return rows;
+    }
+
     var spec = window.__SPEC__;
     var el = document.getElementById('viz');
     spec.create(el, {});
 
     function draw() {
       var mode = document.getElementById('mode').value;
-      document.getElementById('caption').textContent = mode === 'edges'
-        ? 'EDGES mode — delegation lifecycle: from_transition → to_transition, weight = transitions'
+      document.getElementById('caption').textContent =
+        mode === 'edges' ? 'EDGES mode — delegation lifecycle: from → to, weight = transitions'
+        : mode === 'pathfinder' ? 'PATHFINDER mode — synthetic event log (entity, seq, event): builds ordinal paths itself'
         : 'STEPPED mode — order_status → product_category → production_status → print_house, weight = items';
       var config = {
         input_mode: mode,
         bucket_pct: parseFloat(document.getElementById('bucket').value),
         palette: document.getElementById('palette').value,
         show_node_labels: document.getElementById('labels').checked,
-        show_percentages: true, show_values: true
+        show_percentages: true, show_values: true,
+        pathfinder_max_steps: 8, pathfinder_collapse_repeats: true, pathfinder_start_event: ''
       };
       if (mode === 'edges') { spec.updateAsync(edgeData(), el, config, EDGE_QR, {}, function () {}); }
+      else if (mode === 'pathfinder') { spec.updateAsync(pathfinderData(), el, config, PATH_QR, {}, function () {}); }
       else { spec.updateAsync(stepData(), el, config, STEP_QR, {}, function () {}); }
     }
 

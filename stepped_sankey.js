@@ -338,7 +338,135 @@
     };
   }
 
-  /* ---------- render (shared by both modes) ---------- */
+  /* ---------- data transform: PATHFINDER mode ---------- */
+  // Self-contained Amplitude-style path explorer. Input: 3 dimensions in order —
+  // [entity id, order key (time or sequence), event name]. The viz builds each entity's
+  // ordered path itself: pick a start event, cap step count, collapse repeated events.
+  // No pre-pivot model needed. (Looker's row limit applies — filter the explore.)
+  function buildPathfinderModel(data, queryResponse, config) {
+    var D = '';
+    var dims = (queryResponse && queryResponse.fields && queryResponse.fields.dimension_like) || [];
+    if (dims.length < 3) {
+      return { error: 'Pathfinder needs 3 dimensions in order: entity, order (time/sequence), event.' };
+    }
+    if (!data || data.length === 0) { return { error: 'No data.' }; }
+
+    var entityName = dims[0].name, orderName = dims[1].name, eventName = dims[2].name;
+    var maxSteps = Math.floor(toNumber(config.pathfinder_max_steps)) || 8;
+    if (maxSteps < 2) { maxSteps = 2; }
+    var collapse = config.pathfinder_collapse_repeats !== false;
+    var startEvent = (config.pathfinder_start_event || '').toString().trim();
+    var bucketPct = Math.max(0, toNumber(config.bucket_pct));
+
+    var ents = {};
+    var r;
+    for (r = 0; r < data.length; r++) {
+      var row = data[r];
+      var e = cellString(row[entityName]);
+      var ev = cellString(row[eventName]);
+      if (e === '' || ev === '') { continue; }
+      var oc = row[orderName];
+      var ord = oc ? (oc.value !== null && oc.value !== undefined ? oc.value : oc.rendered) : null;
+      if (!ents[e]) { ents[e] = []; }
+      ents[e].push({ order: ord, event: ev });
+    }
+
+    function orderCmp(a, b) {
+      var na = parseFloat(a.order), nb = parseFloat(b.order);
+      if (!isNaN(na) && !isNaN(nb)) { return na - nb; }
+      var sa = String(a.order), sb = String(b.order);
+      return sa < sb ? -1 : (sa > sb ? 1 : 0);
+    }
+
+    var stepNodes = [];
+    var k;
+    for (k = 0; k < maxSteps; k++) { stepNodes.push({}); }
+    var linkCount = {};
+
+    for (var ent in ents) {
+      if (!ents.hasOwnProperty(ent)) { continue; }
+      var seq = ents[ent].slice().sort(orderCmp);
+      var events = [];
+      var i;
+      for (i = 0; i < seq.length; i++) {
+        if (collapse && events.length && events[events.length - 1] === seq[i].event) { continue; }
+        events.push(seq[i].event);
+      }
+      if (startEvent !== '') {
+        var si = -1;
+        for (i = 0; i < events.length; i++) { if (events[i] === startEvent) { si = i; break; } }
+        if (si < 0) { continue; }
+        events = events.slice(si);
+      }
+      if (events.length > maxSteps) { events = events.slice(0, maxSteps); }
+      for (k = 0; k < events.length; k++) {
+        stepNodes[k][events[k]] = (stepNodes[k][events[k]] || 0) + 1;
+        if (k < events.length - 1) {
+          var lk = k + D + events[k] + D + events[k + 1];
+          linkCount[lk] = (linkCount[lk] || 0) + 1;
+        }
+      }
+    }
+
+    var firstTotal = 0;
+    for (var f in stepNodes[0]) { if (stepNodes[0].hasOwnProperty(f)) { firstTotal += stepNodes[0][f]; } }
+    if (!firstTotal) { firstTotal = 1; }
+
+    var columns = [];
+    var relabel = [];
+    var hiddenCount = 0;
+    for (k = 0; k < maxSteps; k++) {
+      var nodesObj = stepNodes[k];
+      var total = 0;
+      for (var x in nodesObj) { if (nodesObj.hasOwnProperty(x)) { total += nodesObj[x]; } }
+      var threshold = (bucketPct / 100) * (total || 1);
+      var map = {}, kept = {}, other = 0;
+      for (var nk in nodesObj) {
+        if (!nodesObj.hasOwnProperty(nk)) { continue; }
+        if (bucketPct > 0 && nodesObj[nk] < threshold) { map[nk] = OTHER_LABEL; other += nodesObj[nk]; hiddenCount++; }
+        else { map[nk] = nk; kept[nk] = (kept[nk] || 0) + nodesObj[nk]; }
+      }
+      if (other > 0) { kept[OTHER_LABEL] = (kept[OTHER_LABEL] || 0) + other; }
+      relabel.push(map);
+      var arr = [];
+      for (var dk in kept) { if (kept.hasOwnProperty(dk)) { arr.push({ key: dk, total: kept[dk], col: k, pct: (kept[dk] / firstTotal) * 100 }); } }
+      arr.sort(function (a, b) {
+        if (a.key === OTHER_LABEL) { return 1; }
+        if (b.key === OTHER_LABEL) { return -1; }
+        return b.total - a.total;
+      });
+      columns.push({ index: k, label: 'Step ' + (k + 1), nodes: arr });
+    }
+    while (columns.length > 1 && columns[columns.length - 1].nodes.length === 0) { columns.pop(); }
+
+    var linkAgg = {};
+    for (var rl in linkCount) {
+      if (!linkCount.hasOwnProperty(rl)) { continue; }
+      var parts = rl.split(D);
+      var kk = parseInt(parts[0], 10);
+      if (kk + 1 > columns.length - 1) { continue; }
+      var src = (relabel[kk] && relabel[kk][parts[1]]) || parts[1];
+      var tgt = (relabel[kk + 1] && relabel[kk + 1][parts[2]]) || parts[2];
+      var ak = kk + D + src + D + tgt;
+      linkAgg[ak] = (linkAgg[ak] || 0) + linkCount[rl];
+    }
+    var links = [];
+    for (var la in linkAgg) {
+      if (!linkAgg.hasOwnProperty(la)) { continue; }
+      var lp = la.split(D);
+      var fc = parseInt(lp[0], 10);
+      links.push({ fromCol: fc, toCol: fc + 1, fromKey: lp[1], toKey: lp[2], weight: linkAgg[la] });
+    }
+
+    assignColors(columns, PALETTES[config.palette] || PALETTES.looker);
+    return {
+      columns: columns, links: links, measureLabel: 'Entities',
+      hiddenCount: hiddenCount, bucketPct: bucketPct, pctRef: firstTotal,
+      showHeaders: true, showPct: true
+    };
+  }
+
+  /* ---------- render (shared by all modes) ---------- */
 
   function render(container, tooltip, config, model) {
     while (container.firstChild) { container.removeChild(container.firstChild); }
@@ -521,6 +649,7 @@
 
   function buildModel(data, queryResponse, config) {
     if (config && config.input_mode === 'edges') { return buildEdgeModel(data, queryResponse, config); }
+    if (config && config.input_mode === 'pathfinder') { return buildPathfinderModel(data, queryResponse, config); }
     return buildSteppedModel(data, queryResponse, config);
   }
 
@@ -532,12 +661,28 @@
     options: {
       input_mode: {
         type: 'string', label: 'Input Mode', display: 'select',
-        values: [{ 'Stepped (N dims = steps)': 'stepped' }, { 'Edges (source, target)': 'edges' }],
+        values: [
+          { 'Stepped (N dims = steps)': 'stepped' },
+          { 'Edges (source, target)': 'edges' },
+          { 'Pathfinder (entity, order, event)': 'pathfinder' }
+        ],
         default: 'stepped', section: 'Data', order: 0
       },
       bucket_pct: {
-        type: 'number', label: 'Bucket below (% of step) into "Other" [stepped]',
+        type: 'number', label: 'Bucket below (% of step) into "Other"',
         default: 5, display: 'number', section: 'Data', order: 1
+      },
+      pathfinder_start_event: {
+        type: 'string', label: 'Pathfinder: Start Event (blank = first)',
+        default: '', display: 'text', section: 'Data', order: 2
+      },
+      pathfinder_max_steps: {
+        type: 'number', label: 'Pathfinder: Max Steps',
+        default: 8, display: 'number', section: 'Data', order: 3
+      },
+      pathfinder_collapse_repeats: {
+        type: 'boolean', label: 'Pathfinder: Collapse Repeated Events',
+        default: true, section: 'Data', order: 4
       },
       palette: {
         type: 'string', label: 'Color Palette', display: 'select',
