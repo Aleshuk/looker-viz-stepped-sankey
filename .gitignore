@@ -1,0 +1,31 @@
+# --- Prevent customer / company data from ever being committed ---
+# Real-data screenshots (only synthetic example.png is allowed)
+sim_*.png
+real_*.png
+*_prod.png
+*gelato*
+*PSP*real*
+
+# Looker / BQ exports that may contain customer data
+*.csv
+*.tsv
+*.json.gz
+export_*.json
+*orders*.json
+*fulfilment*.json
+*fulfillment*.json
+
+# Local debug pages and scratch
+debug.html
+*.local.*
+scratch/
+tmp/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+node_modules/
+.claude/

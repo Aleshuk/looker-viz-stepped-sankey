@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stepped Funnel Sankey — local synthetic harness</title>
+  <style>
+    body { margin: 0; font-family: 'Google Sans','Roboto',Arial,sans-serif; background: #f5f6f7; color: #202124; }
+    header { padding: 12px 16px; background: #fff; border-bottom: 1px solid #e0e0e0; }
+    header h1 { font-size: 15px; margin: 0 0 4px; }
+    header p { font-size: 12px; margin: 0; color: #5f6368; }
+    .controls { padding: 8px 16px; font-size: 12px; }
+    .controls label { margin-right: 14px; }
+    #viz { width: 96vw; height: 70vh; margin: 12px auto; background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Stepped Funnel Sankey — synthetic data harness</h1>
+    <p id="caption"></p>
+  </header>
+  <div class="controls">
+    <label>Mode:
+      <select id="mode"><option value="edges">edges (delegation)</option><option value="stepped">stepped (PSP)</option></select>
+    </label>
+    <label>Bucket %: <input id="bucket" type="number" value="5" min="0" max="50" step="1" style="width:54px" /></label>
+    <label>Palette:
+      <select id="palette"><option>looker</option><option>cool</option><option>warm</option><option>mono</option></select>
+    </label>
+    <label><input id="labels" type="checkbox" checked /> labels</label>
+  </div>
+  <div id="viz"></div>
+
+  <script>
+    window.looker = { plugins: { visualizations: { add: function (spec) { window.__SPEC__ = spec; } } } };
+  </script>
+  <script src="../stepped_sankey.js"></script>
+  <script>
+    function cell(v) { return { value: v, rendered: (typeof v === 'number') ? v.toLocaleString('en-US') : String(v) }; }
+
+    // ---- EDGES mode: real delegation transition edges (from query) ----
+    var EDGE_QR = {
+      fields: {
+        dimension_like: [ { name: 'from_transition', label_short: 'From' }, { name: 'to_transition', label_short: 'To' } ],
+        measure_like: [ { name: 'edge_count', label_short: 'Transitions' } ]
+      }
+    };
+    // synthetic illustrative volumes only — NOT real data
+    var EDGES = [
+      ['Order created','Order created in GN',1000],
+      ['Order created in GN','Plate build triggered',1000],
+      ['Plate build triggered','Delegation fires',950],
+      ['Delegation fires','Delegated order created',680],
+      ['Delegation fires','Delegated order created in GN',240],
+      ['Delegated order created','Delegated order created in GN',880],
+      ['Delegated order created in GN','Plate uploaded',540],
+      ['Delegated order created in GN','Batch release',320],
+      ['Plate uploaded','Batch release',730],
+      ['Batch release','Partner plate uploaded',930],
+      ['Batch release','Tracking synced',300],
+      ['Partner plate uploaded','Printed',90],
+      ['Partner plate uploaded','Tracking synced',760],
+      ['Tracking synced','Printed',1050],
+      ['Printed','Scanned',1180],
+      ['Printed','Failed',32],
+      ['Printed','Cancelled',24],
+      ['Scanned','Shipped',1210],
+      ['Shipped','Tracking synced',60]
+    ];
+    function edgeData() {
+      return EDGES.map(function (e) { return { from_transition: cell(e[0]), to_transition: cell(e[1]), edge_count: cell(e[2]) }; });
+    }
+
+    // ---- STEPPED mode: PSP production flow ----
+    var STEP_DIMS = ['order_status','product_category','production_status','print_house_name'];
+    var STEP_QR = {
+      fields: {
+        dimension_like: [
+          { name: 'order_status', label_short: 'Order Status' },
+          { name: 'product_category', label_short: 'Product Category' },
+          { name: 'production_status', label_short: 'Production Status' },
+          { name: 'print_house_name', label_short: 'Print House' }
+        ],
+        measure_like: [ { name: 'item_count', label_short: 'Item Count' } ]
+      }
+    };
+    var STEP_RAW = [
+      ['In Production','Apparel','Printed','PSP Berlin',4200],
+      ['In Production','Wall Art','Printed','PSP NYC',2600],
+      ['Shipped','Apparel','Printed','PSP Berlin',3100],
+      ['Shipped','Cards','Printed','PSP London',1100],
+      ['Delivered','Apparel','Printed','PSP Berlin',2200],
+      ['Cancelled','Mugs','Failed','PSP NYC',140]
+    ];
+    function stepData() {
+      return STEP_RAW.map(function (r) {
+        var row = {}; for (var d = 0; d < STEP_DIMS.length; d++) { row[STEP_DIMS[d]] = cell(r[d]); }
+        row.item_count = cell(r[4]); return row;
+      });
+    }
+
+    var spec = window.__SPEC__;
+    var el = document.getElementById('viz');
+    spec.create(el, {});
+
+    function draw() {
+      var mode = document.getElementById('mode').value;
+      document.getElementById('caption').textContent = mode === 'edges'
+        ? 'EDGES mode — delegation lifecycle: from_transition → to_transition, weight = transitions'
+        : 'STEPPED mode — order_status → product_category → production_status → print_house, weight = items';
+      var config = {
+        input_mode: mode,
+        bucket_pct: parseFloat(document.getElementById('bucket').value),
+        palette: document.getElementById('palette').value,
+        show_node_labels: document.getElementById('labels').checked,
+        show_percentages: true, show_values: true
+      };
+      if (mode === 'edges') { spec.updateAsync(edgeData(), el, config, EDGE_QR, {}, function () {}); }
+      else { spec.updateAsync(stepData(), el, config, STEP_QR, {}, function () {}); }
+    }
+
+    ['mode','bucket','palette','labels'].forEach(function (id) {
+      document.getElementById(id).addEventListener('change', draw);
+      document.getElementById(id).addEventListener('input', draw);
+    });
+    draw();
+  </script>
+</body>
+</html>
