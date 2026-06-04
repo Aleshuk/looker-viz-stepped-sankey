@@ -45,26 +45,27 @@
         measure_like: [ { name: 'edge_count', label_short: 'Transitions' } ]
       }
     };
+    // synthetic illustrative volumes only — NOT real data
     var EDGES = [
-      ['Order created','Order created in GN',306498],
-      ['Order created in GN','Plate build triggered',306344],
-      ['Plate build triggered','Delegation fires',295469],
-      ['Delegation fires','Delegated order created',209872],
-      ['Delegation fires','Delegated order created in GN',73826],
-      ['Delegated order created','Delegated order created in GN',269360],
-      ['Delegated order created in GN','Plate uploaded',166172],
-      ['Delegated order created in GN','Batch release',98393],
-      ['Plate uploaded','Batch release',224215],
-      ['Batch release','Partner plate uploaded',286514],
-      ['Batch release','Tracking synced',93941],
-      ['Partner plate uploaded','Printed',27835],
-      ['Partner plate uploaded','Tracking synced',232002],
-      ['Tracking synced','Printed',322946],
-      ['Printed','Scanned',361004],
-      ['Printed','Failed',9800],
-      ['Printed','Cancelled',7400],
-      ['Scanned','Shipped',370695],
-      ['Shipped','Tracking synced',19295]
+      ['Order created','Order created in GN',1000],
+      ['Order created in GN','Plate build triggered',1000],
+      ['Plate build triggered','Delegation fires',950],
+      ['Delegation fires','Delegated order created',680],
+      ['Delegation fires','Delegated order created in GN',240],
+      ['Delegated order created','Delegated order created in GN',880],
+      ['Delegated order created in GN','Plate uploaded',540],
+      ['Delegated order created in GN','Batch release',320],
+      ['Plate uploaded','Batch release',730],
+      ['Batch release','Partner plate uploaded',930],
+      ['Batch release','Tracking synced',300],
+      ['Partner plate uploaded','Printed',90],
+      ['Partner plate uploaded','Tracking synced',760],
+      ['Tracking synced','Printed',1050],
+      ['Printed','Scanned',1180],
+      ['Printed','Failed',32],
+      ['Printed','Cancelled',24],
+      ['Scanned','Shipped',1210],
+      ['Shipped','Tracking synced',60]
     ];
     function edgeData() {
       return EDGES.map(function (e) { return { from_transition: cell(e[0]), to_transition: cell(e[1]), edge_count: cell(e[2]) }; });
