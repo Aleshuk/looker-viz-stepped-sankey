@@ -2,12 +2,15 @@
  * Stepped / Funnel-style Sankey — Looker custom visualization
  *
  * One self-contained IIFE. Vanilla JS + SVG, no dependencies, no build step.
- * Input contract: N dimensions (>= 2, each one ordered "step") + 1 measure (flow weight).
  *
- * Each dimension is a column/step. Distinct values at a step are nodes; bar height is
- * proportional to the summed measure. Ribbons between consecutive steps are sized by the
- * summed measure of rows sharing both values. Percentages are retention vs. the first step.
- * Nodes below a configurable share of their step total are bucketed into "Other".
+ * Two input modes (option "Input Mode"):
+ *   - "stepped": N dimensions (>= 2, each an ordered step) + 1 measure (flow weight).
+ *       Distinct values at a step are nodes; ribbons connect consecutive steps.
+ *   - "edges":   2 dimensions (source node, target node) + 1 measure (edge weight).
+ *       Renders an edge-list Sankey; node columns are placed by longest-path depth,
+ *       so skipped stages and branches (e.g. Failed / Cancelled) render naturally.
+ *
+ * Nodes below a configurable share of their column total are bucketed into "Other".
  */
 (function () {
   'use strict';
@@ -85,171 +88,257 @@
     };
   }
 
-  function readableTextColor(hex) {
-    var h = String(hex).replace('#', '');
-    if (h.length === 3) { h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2]; }
-    var r = parseInt(h.substring(0, 2), 16);
-    var g = parseInt(h.substring(2, 4), 16);
-    var b = parseInt(h.substring(4, 6), 16);
-    var yiq = (r * 299 + g * 587 + b * 114) / 1000;
-    return yiq >= 140 ? '#202124' : '#ffffff';
+  function truncate(s, n) {
+    s = String(s);
+    if (s.length <= n) { return s; }
+    return s.substring(0, Math.max(1, n - 1)) + '…';
   }
 
-  /* ---------- data transform ---------- */
+  function assignColors(columns, palette) {
+    var colorMap = {};
+    var idx = 0;
+    for (var c = 0; c < columns.length; c++) {
+      var nodes = columns[c].nodes;
+      for (var i = 0; i < nodes.length; i++) {
+        var lbl = nodes[i].key;
+        if (lbl === OTHER_LABEL) { nodes[i].color = OTHER_COLOR; continue; }
+        if (!colorMap[lbl]) { colorMap[lbl] = palette[idx % palette.length]; idx++; }
+        nodes[i].color = colorMap[lbl];
+      }
+    }
+  }
 
-  function buildModel(data, queryResponse, config) {
+  /* ---------- data transform: STEPPED mode ---------- */
+
+  function buildSteppedModel(data, queryResponse, config) {
     var dims = (queryResponse && queryResponse.fields && queryResponse.fields.dimension_like) || [];
     var measures = (queryResponse && queryResponse.fields && queryResponse.fields.measure_like) || [];
 
     if (dims.length < 2) {
-      return { error: 'Stepped Sankey needs at least 2 dimensions (each is a step). Add another dimension.' };
+      return { error: 'Stepped mode needs at least 2 dimensions (each is a step). Add another dimension.' };
     }
     if (measures.length < 1) {
-      return { error: 'Stepped Sankey needs exactly 1 measure (the flow weight). Add a measure.' };
+      return { error: 'Stepped mode needs 1 measure (the flow weight). Add a measure.' };
     }
-    if (!data || data.length === 0) {
-      return { error: 'No data.' };
-    }
+    if (!data || data.length === 0) { return { error: 'No data.' }; }
 
     var measure = measures[0];
     var measureName = measure.name;
     var measureLabel = measure.label_short || measure.label || measureName;
-
-    var bucketPct = toNumber(config.bucket_pct);
-    if (bucketPct < 0) { bucketPct = 0; }
-
+    var bucketPct = Math.max(0, toNumber(config.bucket_pct));
     var nSteps = dims.length;
     var s, i, r;
 
-    // raw node totals per step + raw link totals between consecutive steps
     var rawSteps = [];
     for (s = 0; s < nSteps; s++) {
       rawSteps.push({ index: s, label: dims[s].label_short || dims[s].label || dims[s].name, nodes: {} });
     }
-    var rawLinks = {}; // key "s|src|tgt" -> weight
+    var rawLinks = {};
 
     for (r = 0; r < data.length; r++) {
       var row = data[r];
       var m = cellNumber(row[measureName]);
       if (m === 0) { continue; }
       var vals = [];
-      for (s = 0; s < nSteps; s++) {
-        vals.push(cellString(row[dims[s].name]));
-      }
+      for (s = 0; s < nSteps; s++) { vals.push(cellString(row[dims[s].name])); }
       for (s = 0; s < nSteps; s++) {
         var v = vals[s];
         if (v === '') { continue; }
-        var bucket = rawSteps[s].nodes;
-        bucket[v] = (bucket[v] || 0) + m;
-        if (s < nSteps - 1) {
-          var nv = vals[s + 1];
-          if (nv !== '') {
-            var lk = s + '|' + v + '|' + nv;
-            rawLinks[lk] = (rawLinks[lk] || 0) + m;
-          }
+        rawSteps[s].nodes[v] = (rawSteps[s].nodes[v] || 0) + m;
+        if (s < nSteps - 1 && vals[s + 1] !== '') {
+          var lk = s + '' + v + '' + vals[s + 1];
+          rawLinks[lk] = (rawLinks[lk] || 0) + m;
         }
       }
     }
 
-    // step totals
     for (s = 0; s < nSteps; s++) {
-      var tot = 0;
-      var nodesObj = rawSteps[s].nodes;
-      for (var key in nodesObj) { if (nodesObj.hasOwnProperty(key)) { tot += nodesObj[key]; } }
+      var tot = 0, no = rawSteps[s].nodes;
+      for (var key in no) { if (no.hasOwnProperty(key)) { tot += no[key]; } }
       rawSteps[s].total = tot;
     }
-
     var firstTotal = rawSteps[0].total || 1;
 
-    // bucket small nodes into "Other" per step; build a per-step relabel map
-    var relabel = []; // relabel[s] = { originalValue -> displayKey }
+    var relabel = [];
     var hiddenCount = 0;
-    var resolvedSteps = [];
-
+    var columns = [];
     for (s = 0; s < nSteps; s++) {
       var stepNodes = rawSteps[s].nodes;
       var stepTotal = rawSteps[s].total || 1;
       var threshold = (bucketPct / 100) * stepTotal;
-      var map = {};
-      var kept = {}; // displayKey -> total
-      var otherTotal = 0;
+      var map = {}, kept = {}, otherTotal = 0;
       for (var nk in stepNodes) {
         if (!stepNodes.hasOwnProperty(nk)) { continue; }
-        var val = stepNodes[nk];
-        if (bucketPct > 0 && val < threshold) {
-          map[nk] = OTHER_LABEL;
-          otherTotal += val;
-          hiddenCount++;
+        if (bucketPct > 0 && stepNodes[nk] < threshold) {
+          map[nk] = OTHER_LABEL; otherTotal += stepNodes[nk]; hiddenCount++;
         } else {
-          map[nk] = nk;
-          kept[nk] = (kept[nk] || 0) + val;
+          map[nk] = nk; kept[nk] = (kept[nk] || 0) + stepNodes[nk];
         }
       }
       if (otherTotal > 0) { kept[OTHER_LABEL] = (kept[OTHER_LABEL] || 0) + otherTotal; }
       relabel.push(map);
-
-      // sort nodes desc by total, Other always last
       var arr = [];
-      for (var dk in kept) {
-        if (kept.hasOwnProperty(dk)) { arr.push({ key: dk, total: kept[dk] }); }
-      }
+      for (var dk in kept) { if (kept.hasOwnProperty(dk)) { arr.push({ key: dk, total: kept[dk] }); } }
       arr.sort(function (a, b) {
         if (a.key === OTHER_LABEL) { return 1; }
         if (b.key === OTHER_LABEL) { return -1; }
         return b.total - a.total;
       });
-      for (i = 0; i < arr.length; i++) {
-        arr[i].pct = (arr[i].total / firstTotal) * 100;
-        arr[i].stepIndex = s;
-      }
-      resolvedSteps.push({ index: s, label: rawSteps[s].label, nodes: arr, total: stepTotal });
+      for (i = 0; i < arr.length; i++) { arr[i].pct = (arr[i].total / firstTotal) * 100; arr[i].col = s; }
+      columns.push({ index: s, label: rawSteps[s].label, nodes: arr });
     }
 
-    // remap links through the bucket relabel maps and aggregate
-    var linkAgg = {}; // "s|dispSrc|dispTgt" -> weight
+    var linkAgg = {};
     for (var rl in rawLinks) {
       if (!rawLinks.hasOwnProperty(rl)) { continue; }
-      var parts = rl.split('|');
+      var parts = rl.split('');
       var ls = parseInt(parts[0], 10);
-      var src = parts.slice(1, parts.length - 1).join('|'); // tolerate '|' in values (unlikely after split, kept simple)
-      var tgt = parts[parts.length - 1];
-      var dispSrc = relabel[ls][src] || src;
-      var dispTgt = relabel[ls + 1][tgt] || tgt;
-      var ak = ls + '|' + dispSrc + '|' + dispTgt;
+      var dispSrc = relabel[ls][parts[1]] || parts[1];
+      var dispTgt = relabel[ls + 1][parts[2]] || parts[2];
+      var ak = ls + '' + dispSrc + '' + dispTgt;
       linkAgg[ak] = (linkAgg[ak] || 0) + rawLinks[rl];
     }
     var links = [];
     for (var la in linkAgg) {
       if (!linkAgg.hasOwnProperty(la)) { continue; }
-      var lp = la.split('|');
-      links.push({ step: parseInt(lp[0], 10), fromKey: lp[1], toKey: lp[2], weight: linkAgg[la] });
+      var lp = la.split('');
+      var fc = parseInt(lp[0], 10);
+      links.push({ fromCol: fc, toCol: fc + 1, fromKey: lp[1], toKey: lp[2], weight: linkAgg[la] });
     }
 
-    // assign stable colors by display label (Other fixed grey)
-    var palette = PALETTES[config.palette] || PALETTES.looker;
-    var colorMap = {};
-    var colorIdx = 0;
-    for (s = 0; s < resolvedSteps.length; s++) {
-      var ns = resolvedSteps[s].nodes;
-      for (i = 0; i < ns.length; i++) {
-        var lbl = ns[i].key;
-        if (lbl === OTHER_LABEL) { ns[i].color = OTHER_COLOR; continue; }
-        if (!colorMap[lbl]) { colorMap[lbl] = palette[colorIdx % palette.length]; colorIdx++; }
-        ns[i].color = colorMap[lbl];
-      }
-    }
-
+    assignColors(columns, PALETTES[config.palette] || PALETTES.looker);
     return {
-      steps: resolvedSteps,
-      links: links,
-      firstTotal: firstTotal,
-      measureLabel: measureLabel,
-      hiddenCount: hiddenCount,
-      bucketPct: bucketPct
+      columns: columns, links: links, measureLabel: measureLabel,
+      hiddenCount: hiddenCount, bucketPct: bucketPct, pctRef: firstTotal,
+      showHeaders: true, showPct: true
     };
   }
 
-  /* ---------- render ---------- */
+  /* ---------- data transform: EDGES mode ---------- */
+
+  function buildEdgeModel(data, queryResponse, config) {
+    var dims = (queryResponse && queryResponse.fields && queryResponse.fields.dimension_like) || [];
+    var measures = (queryResponse && queryResponse.fields && queryResponse.fields.measure_like) || [];
+
+    if (dims.length < 2) {
+      return { error: 'Edges mode needs 2 dimensions: source then target. Add the target dimension.' };
+    }
+    if (measures.length < 1) {
+      return { error: 'Edges mode needs 1 measure (the edge weight). Add a measure.' };
+    }
+    if (!data || data.length === 0) { return { error: 'No data.' }; }
+
+    var srcName = dims[0].name, tgtName = dims[1].name;
+    var measure = measures[0];
+    var measureName = measure.name;
+    var measureLabel = measure.label_short || measure.label || measureName;
+
+    var edgeAgg = {};
+    var outSum = {}, inSum = {}, adj = {};
+    var r;
+    for (r = 0; r < data.length; r++) {
+      var row = data[r];
+      var w = cellNumber(row[measureName]);
+      if (w === 0) { continue; }
+      var src = cellString(row[srcName]);
+      var tgt = cellString(row[tgtName]);
+      if (src === '' || tgt === '' || src === tgt) { continue; }
+      var ek = src + '' + tgt;
+      edgeAgg[ek] = (edgeAgg[ek] || 0) + w;
+      outSum[src] = (outSum[src] || 0) + w;
+      inSum[tgt] = (inSum[tgt] || 0) + w;
+      if (!inSum[src]) { inSum[src] = inSum[src] || 0; }
+      if (!outSum[tgt]) { outSum[tgt] = outSum[tgt] || 0; }
+      if (!adj[src]) { adj[src] = []; }
+      adj[src].push(tgt);
+    }
+
+    var nodeKeys = {};
+    var n;
+    for (n in outSum) { if (outSum.hasOwnProperty(n)) { nodeKeys[n] = true; } }
+    for (n in inSum) { if (inSum.hasOwnProperty(n)) { nodeKeys[n] = true; } }
+    var allNodes = [];
+    for (n in nodeKeys) { if (nodeKeys.hasOwnProperty(n)) { allNodes.push(n); } }
+
+    // Detect back-edges with a DFS so the layout uses only the acyclic (forward) edges.
+    // The lifecycle can contain cycles (e.g. Shipped -> Tracking synced -> Printed); without
+    // this, longest-path relaxation inflates depths to the node count and ribbons span the
+    // whole chart.
+    var stateMap = {}; // 0 unvisited, 1 on-stack, 2 done
+    var backEdge = {};
+    for (var z = 0; z < allNodes.length; z++) { stateMap[allNodes[z]] = 0; }
+    function visit(u) {
+      stateMap[u] = 1;
+      var nbrs = adj[u] || [];
+      for (var j = 0; j < nbrs.length; j++) {
+        var v = nbrs[j];
+        if (stateMap[v] === 1) { backEdge[u + '' + v] = true; }
+        else if (stateMap[v] === 0) { visit(v); }
+      }
+      stateMap[u] = 2;
+    }
+    // start from roots (no incoming) first, then any remaining nodes
+    for (var rn = 0; rn < allNodes.length; rn++) {
+      if (!(inSum[allNodes[rn]] > 0) && stateMap[allNodes[rn]] === 0) { visit(allNodes[rn]); }
+    }
+    for (var rn2 = 0; rn2 < allNodes.length; rn2++) {
+      if (stateMap[allNodes[rn2]] === 0) { visit(allNodes[rn2]); }
+    }
+
+    // longest-path depth over forward (non-back) edges only — acyclic, converges cleanly
+    var depth = {};
+    for (var a = 0; a < allNodes.length; a++) { depth[allNodes[a]] = 0; }
+    var iterations = allNodes.length;
+    for (var it = 0; it < iterations; it++) {
+      var changed = false;
+      for (var u2 in adj) {
+        if (!adj.hasOwnProperty(u2)) { continue; }
+        var nb = adj[u2];
+        for (var jj = 0; jj < nb.length; jj++) {
+          var v2 = nb[jj];
+          if (backEdge[u2 + '' + v2]) { continue; }
+          if (depth[v2] < depth[u2] + 1) { depth[v2] = depth[u2] + 1; changed = true; }
+        }
+      }
+      if (!changed) { break; }
+    }
+
+    var maxDepth = 0;
+    for (n in depth) { if (depth.hasOwnProperty(n) && depth[n] > maxDepth) { maxDepth = depth[n]; } }
+
+    var columns = [];
+    for (var c = 0; c <= maxDepth; c++) { columns.push({ index: c, label: '', nodes: [] }); }
+    var firstColTotal = 0;
+    for (var b = 0; b < allNodes.length; b++) {
+      var key = allNodes[b];
+      var total = Math.max(outSum[key] || 0, inSum[key] || 0);
+      var node = { key: key, total: total, col: depth[key] };
+      columns[depth[key]].nodes.push(node);
+      if (depth[key] === 0) { firstColTotal += total; }
+    }
+    if (firstColTotal === 0) { firstColTotal = 1; }
+    for (c = 0; c < columns.length; c++) {
+      columns[c].nodes.sort(function (a2, b2) { return b2.total - a2.total; });
+      for (var k = 0; k < columns[c].nodes.length; k++) {
+        columns[c].nodes[k].pct = (columns[c].nodes[k].total / firstColTotal) * 100;
+      }
+    }
+
+    var links = [];
+    for (var ek2 in edgeAgg) {
+      if (!edgeAgg.hasOwnProperty(ek2)) { continue; }
+      var pp = ek2.split('');
+      links.push({ fromCol: depth[pp[0]], toCol: depth[pp[1]], fromKey: pp[0], toKey: pp[1], weight: edgeAgg[ek2] });
+    }
+
+    assignColors(columns, PALETTES[config.palette] || PALETTES.looker);
+    return {
+      columns: columns, links: links, measureLabel: measureLabel,
+      hiddenCount: 0, pctRef: firstColTotal, showHeaders: false, showPct: false
+    };
+  }
+
+  /* ---------- render (shared by both modes) ---------- */
 
   function render(container, tooltip, config, model) {
     while (container.firstChild) { container.removeChild(container.firstChild); }
@@ -260,55 +349,48 @@
 
     var fontSize = toNumber(config.font_size) || 12;
     var nodeWidth = toNumber(config.node_width) || 22;
-    var nodeGap = toNumber(config.node_gap);
-    if (nodeGap <= 0) { nodeGap = 14; }
-    var linkOpacity = toNumber(config.link_opacity);
-    if (linkOpacity <= 0) { linkOpacity = 0.4; }
-    var showPct = config.show_percentages !== false;
+    var nodeGap = toNumber(config.node_gap); if (nodeGap <= 0) { nodeGap = 14; }
+    var linkOpacity = toNumber(config.link_opacity); if (linkOpacity <= 0) { linkOpacity = 0.4; }
+    var showPct = config.show_percentages !== false && model.showPct;
     var showVals = config.show_values !== false;
     var showLabels = config.show_node_labels !== false;
 
-    var padTop = 56;          // room for the header chip + step labels
-    var padBottom = 26;       // room for the bottom node's value/pct text
+    var padTop = model.showHeaders ? 56 : 36;
+    var padBottom = 26;
     var padLeft = 8;
     var padRight = 8;
 
-    var steps = model.steps;
-    var nSteps = steps.length;
+    var columns = model.columns;
+    var nCols = columns.length;
+    if (nCols === 0) { renderMessage(container, 'No nodes to display.'); return; }
 
     var usableH = H - padTop - padBottom;
     var usableW = W - padLeft - padRight;
     if (usableH < 20 || usableW < 20) { return; }
 
-    // global px-per-unit so link thickness matches at both ends
-    var maxStepTotal = 1;
-    var maxGapPx = 0;
-    var st;
-    for (st = 0; st < nSteps; st++) {
-      if (steps[st].total > maxStepTotal) { maxStepTotal = steps[st].total; }
-      var g = (steps[st].nodes.length - 1) * nodeGap;
+    var maxColTotal = 1, maxGapPx = 0, c, nodes, i;
+    for (c = 0; c < nCols; c++) {
+      var colTotal = 0;
+      for (i = 0; i < columns[c].nodes.length; i++) { colTotal += columns[c].nodes[i].total; }
+      if (colTotal > maxColTotal) { maxColTotal = colTotal; }
+      var g = (columns[c].nodes.length - 1) * nodeGap;
       if (g > maxGapPx) { maxGapPx = g; }
     }
-    var pxPerUnit = (usableH - maxGapPx) / maxStepTotal;
+    var pxPerUnit = (usableH - maxGapPx) / maxColTotal;
     if (pxPerUnit <= 0) { pxPerUnit = 0.0001; }
 
-    // x position per step
-    var stepGapX = nSteps > 1 ? (usableW - nodeWidth) / (nSteps - 1) : 0;
-    function stepX(s) { return padLeft + s * stepGapX; }
+    var stepGapX = nCols > 1 ? (usableW - nodeWidth) / (nCols - 1) : 0;
+    function colX(c2) { return padLeft + c2 * stepGapX; }
 
-    // lay out nodes: top-aligned column per step, compute y + height
-    var nodeIndex = {}; // "s|key" -> node ref (with x,y,h,color,total)
-    for (st = 0; st < nSteps; st++) {
+    var nodeIndex = {};
+    for (c = 0; c < nCols; c++) {
       var y = padTop;
-      var nodes = steps[st].nodes;
-      for (var ni = 0; ni < nodes.length; ni++) {
-        var node = nodes[ni];
+      nodes = columns[c].nodes;
+      for (i = 0; i < nodes.length; i++) {
+        var node = nodes[i];
         node.h = Math.max(1, node.total * pxPerUnit);
-        node.x = stepX(st);
-        node.y = y;
-        node.outOffset = 0;
-        node.inOffset = 0;
-        nodeIndex[st + '|' + node.key] = node;
+        node.x = colX(c); node.y = y; node.outOffset = 0; node.inOffset = 0;
+        nodeIndex[c + '|' + node.key] = node;
         y += node.h + nodeGap;
       }
     }
@@ -317,51 +399,49 @@
     svg.style.display = 'block';
     svg.style.fontFamily = "'Google Sans','Roboto',Arial,sans-serif";
 
-    // --- links first (under nodes) ---
-    // order outgoing links by target node y, incoming by source node y, to reduce crossings
-    var linksByStep = {};
+    function bindTip(shape, html) {
+      shape.addEventListener('mousemove', function (e) {
+        tooltip.innerHTML = html;
+        tooltip.style.display = 'block';
+        var left = e.offsetX + 14;
+        if (left + 220 > container.clientWidth) { left = e.offsetX - 230; }
+        tooltip.style.left = left + 'px';
+        tooltip.style.top = (e.offsetY + 14) + 'px';
+      });
+      shape.addEventListener('mouseout', function () { tooltip.style.display = 'none'; });
+    }
+
+    // links first
+    var byCol = {};
     var li;
     for (li = 0; li < model.links.length; li++) {
       var lnk = model.links[li];
-      if (!linksByStep[lnk.step]) { linksByStep[lnk.step] = []; }
-      linksByStep[lnk.step].push(lnk);
+      if (!byCol[lnk.fromCol]) { byCol[lnk.fromCol] = []; }
+      byCol[lnk.fromCol].push(lnk);
     }
-    for (var sKey in linksByStep) {
-      if (!linksByStep.hasOwnProperty(sKey)) { continue; }
-      var sIdx = parseInt(sKey, 10);
-      var arr = linksByStep[sKey];
+    for (var sk in byCol) {
+      if (!byCol.hasOwnProperty(sk)) { continue; }
+      var arr = byCol[sk];
       arr.sort(function (a, b) {
-        var ta = nodeIndex[(sIdx + 1) + '|' + a.toKey];
-        var tb = nodeIndex[(sIdx + 1) + '|' + b.toKey];
-        var ya = ta ? ta.y : 0;
-        var yb = tb ? tb.y : 0;
-        if (ya !== yb) { return ya - yb; }
-        var sa = nodeIndex[sIdx + '|' + a.fromKey];
-        var sb = nodeIndex[sIdx + '|' + b.fromKey];
-        return (sa ? sa.y : 0) - (sb ? sb.y : 0);
+        var ta = nodeIndex[a.toCol + '|' + a.toKey], tb = nodeIndex[b.toCol + '|' + b.toKey];
+        return (ta ? ta.y : 0) - (tb ? tb.y : 0);
       });
-      for (li = 0; li < arr.length; li++) {
-        drawLink(arr[li], sIdx);
-      }
+      for (li = 0; li < arr.length; li++) { drawLink(arr[li]); }
     }
 
-    function drawLink(lnk, sIdx) {
-      var src = nodeIndex[sIdx + '|' + lnk.fromKey];
-      var tgt = nodeIndex[(sIdx + 1) + '|' + lnk.toKey];
+    function drawLink(lnk) {
+      var src = nodeIndex[lnk.fromCol + '|' + lnk.fromKey];
+      var tgt = nodeIndex[lnk.toCol + '|' + lnk.toKey];
       if (!src || !tgt) { return; }
       var thick = Math.max(0.5, lnk.weight * pxPerUnit);
-      var x0 = src.x + nodeWidth;
-      var x1 = tgt.x;
+      var x0 = src.x + nodeWidth, x1 = tgt.x;
       var y0 = src.y + src.outOffset + thick / 2;
       var y1 = tgt.y + tgt.inOffset + thick / 2;
-      src.outOffset += thick;
-      tgt.inOffset += thick;
+      src.outOffset += thick; tgt.inOffset += thick;
       var cx = (x0 + x1) / 2;
-      var d = 'M' + x0 + ',' + y0 +
-        ' C' + cx + ',' + y0 + ' ' + cx + ',' + y1 + ' ' + x1 + ',' + y1;
       var path = svgEl('path', {
-        d: d, fill: 'none', stroke: src.color,
-        'stroke-width': thick, 'stroke-opacity': linkOpacity
+        d: 'M' + x0 + ',' + y0 + ' C' + cx + ',' + y0 + ' ' + cx + ',' + y1 + ' ' + x1 + ',' + y1,
+        fill: 'none', stroke: src.color, 'stroke-width': thick, 'stroke-opacity': linkOpacity
       });
       path.style.cursor = 'pointer';
       var pctOfSrc = src.total > 0 ? (lnk.weight / src.total) * 100 : 0;
@@ -374,38 +454,29 @@
       svg.appendChild(path);
     }
 
-    // --- nodes + labels on top ---
-    for (st = 0; st < nSteps; st++) {
-      var stepNodes = steps[st].nodes;
-      var isLast = (st === nSteps - 1);
-      // last column hugs the right edge, so its text is drawn to the LEFT and end-anchored
-      var headerX = isLast ? stepX(st) + nodeWidth : stepX(st);
-      var headerAnchor = isLast ? 'end' : 'start';
+    // nodes + labels
+    for (c = 0; c < nCols; c++) {
+      var isLast = (c === nCols - 1);
+      nodes = columns[c].nodes;
 
-      // step header label
-      var hdr = svgEl('text', {
-        x: headerX, y: 30, 'font-size': fontSize,
-        'font-weight': 'bold', fill: '#5f6368', 'text-anchor': headerAnchor
-      });
-      hdr.textContent = 'Step ' + (st + 1);
-      svg.appendChild(hdr);
-      var hdr2 = svgEl('text', {
-        x: headerX, y: 44, 'font-size': fontSize - 1, fill: '#80868b', 'text-anchor': headerAnchor
-      });
-      hdr2.textContent = truncate(steps[st].label, Math.max(8, Math.floor(stepGapX / (fontSize * 0.6))));
-      svg.appendChild(hdr2);
+      if (model.showHeaders) {
+        var hx = isLast ? colX(c) + nodeWidth : colX(c);
+        var ha = isLast ? 'end' : 'start';
+        var hdr = svgEl('text', { x: hx, y: 30, 'font-size': fontSize, 'font-weight': 'bold', fill: '#5f6368', 'text-anchor': ha });
+        hdr.textContent = 'Step ' + (c + 1);
+        svg.appendChild(hdr);
+        var hdr2 = svgEl('text', { x: hx, y: 44, 'font-size': fontSize - 1, fill: '#80868b', 'text-anchor': ha });
+        hdr2.textContent = truncate(columns[c].label, Math.max(8, Math.floor(stepGapX / (fontSize * 0.6))));
+        svg.appendChild(hdr2);
+      }
 
-      for (var k = 0; k < stepNodes.length; k++) {
-        var nd = stepNodes[k];
-        var rect = svgEl('rect', {
-          x: nd.x, y: nd.y, width: nodeWidth, height: nd.h,
-          fill: nd.color, rx: 1.5, ry: 1.5
-        });
+      for (var kk = 0; kk < nodes.length; kk++) {
+        var nd = nodes[kk];
+        var rect = svgEl('rect', { x: nd.x, y: nd.y, width: nodeWidth, height: nd.h, fill: nd.color, rx: 1.5, ry: 1.5 });
         rect.style.cursor = 'pointer';
-        bindTip(rect,
-          '<b>' + escapeHtml(nd.key) + '</b>' +
-          '<br>' + escapeHtml(model.measureLabel) + ': ' + formatNumber(nd.total) +
-          '<br>' + formatPct(nd.pct) + ' of Step 1');
+        var tip = '<b>' + escapeHtml(nd.key) + '</b><br>' + escapeHtml(model.measureLabel) + ': ' + formatNumber(nd.total);
+        if (model.showPct) { tip += '<br>' + formatPct(nd.pct) + ' of start'; }
+        bindTip(rect, tip);
         rect.addEventListener('mouseover', function () { this.setAttribute('opacity', '0.82'); });
         rect.addEventListener('mouseout', function () { this.setAttribute('opacity', '1'); });
         svg.appendChild(rect);
@@ -414,12 +485,10 @@
           var tx = isLast ? nd.x - 6 : nd.x + nodeWidth + 6;
           var anchor = isLast ? 'end' : 'start';
           var maxChars = Math.max(6, Math.floor((stepGapX - nodeWidth - 10) / (fontSize * 0.58)));
-          // name
           var t1 = svgEl('text', { x: tx, y: nd.y + 12, 'font-size': fontSize, 'font-weight': 'bold', fill: '#202124', 'text-anchor': anchor });
           t1.textContent = truncate(nd.key, maxChars);
           var ttl = svgEl('title'); ttl.textContent = nd.key; t1.appendChild(ttl);
           svg.appendChild(t1);
-          // value + pct
           var sub = [];
           if (showVals) { sub.push(formatNumber(nd.total)); }
           if (showPct) { sub.push(formatPct(nd.pct)); }
@@ -432,7 +501,6 @@
       }
     }
 
-    // --- header chip (hidden/bucketed count) ---
     if (model.hiddenCount > 0) {
       var chip = svgEl('text', { x: W - padRight, y: 20, 'font-size': fontSize - 1, fill: '#80868b', 'text-anchor': 'end' });
       chip.textContent = model.hiddenCount + ' node(s) bucketed into "Other" (< ' + model.bucketPct + '% of step)';
@@ -440,43 +508,20 @@
     }
 
     container.appendChild(svg);
-
-    /* tooltip wiring */
-    function bindTip(shape, html) {
-      shape.addEventListener('mousemove', function (e) {
-        tooltip.innerHTML = html;
-        tooltip.style.display = 'block';
-        var cw = container.clientWidth;
-        var left = e.offsetX + 14;
-        if (left + 220 > cw) { left = e.offsetX - 230; }
-        tooltip.style.left = left + 'px';
-        tooltip.style.top = (e.offsetY + 14) + 'px';
-      });
-      shape.addEventListener('mouseout', function () { tooltip.style.display = 'none'; });
-    }
-  }
-
-  function truncate(s, n) {
-    s = String(s);
-    if (s.length <= n) { return s; }
-    return s.substring(0, Math.max(1, n - 1)) + '…';
   }
 
   function renderMessage(container, msg) {
     while (container.firstChild) { container.removeChild(container.firstChild); }
     var div = document.createElement('div');
-    div.style.display = 'flex';
-    div.style.alignItems = 'center';
-    div.style.justifyContent = 'center';
-    div.style.height = '100%';
-    div.style.width = '100%';
-    div.style.color = '#80868b';
-    div.style.fontFamily = "'Google Sans','Roboto',Arial,sans-serif";
-    div.style.fontSize = '13px';
-    div.style.textAlign = 'center';
-    div.style.padding = '12px';
+    div.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100%;width:100%;' +
+      "color:#80868b;font-family:'Google Sans','Roboto',Arial,sans-serif;font-size:13px;text-align:center;padding:12px;";
     div.textContent = msg;
     container.appendChild(div);
+  }
+
+  function buildModel(data, queryResponse, config) {
+    if (config && config.input_mode === 'edges') { return buildEdgeModel(data, queryResponse, config); }
+    return buildSteppedModel(data, queryResponse, config);
   }
 
   /* ---------- registration ---------- */
@@ -485,8 +530,13 @@
     id: 'stepped_sankey',
     label: 'Stepped Funnel Sankey',
     options: {
+      input_mode: {
+        type: 'string', label: 'Input Mode', display: 'select',
+        values: [{ 'Stepped (N dims = steps)': 'stepped' }, { 'Edges (source, target)': 'edges' }],
+        default: 'stepped', section: 'Data', order: 0
+      },
       bucket_pct: {
-        type: 'number', label: 'Bucket below (% of step) into "Other"',
+        type: 'number', label: 'Bucket below (% of step) into "Other" [stepped]',
         default: 5, display: 'number', section: 'Data', order: 1
       },
       palette: {
@@ -496,7 +546,7 @@
       },
       show_node_labels: { type: 'boolean', label: 'Show Node Labels', default: true, section: 'Style', order: 2 },
       show_values: { type: 'boolean', label: 'Show Values', default: true, section: 'Style', order: 3 },
-      show_percentages: { type: 'boolean', label: 'Show % of Step 1', default: true, section: 'Style', order: 4 },
+      show_percentages: { type: 'boolean', label: 'Show % (stepped)', default: true, section: 'Style', order: 4 },
       node_width: { type: 'number', label: 'Node Width (px)', default: 22, display: 'number', section: 'Style', order: 5 },
       node_gap: { type: 'number', label: 'Node Gap (px)', default: 14, display: 'number', section: 'Style', order: 6 },
       link_opacity: { type: 'number', label: 'Link Opacity (0-1)', default: 0.4, display: 'number', section: 'Style', order: 7 },
@@ -505,44 +555,26 @@
 
     create: function (element, config) {
       var container = document.createElement('div');
-      container.style.position = 'relative';
-      container.style.width = '100%';
-      container.style.height = '100%';
-      container.style.overflow = 'hidden';
-
+      container.style.cssText = 'position:relative;width:100%;height:100%;overflow:hidden;';
       var tooltip = document.createElement('div');
-      tooltip.style.position = 'absolute';
-      tooltip.style.display = 'none';
-      tooltip.style.pointerEvents = 'none';
-      tooltip.style.background = 'rgba(32,33,36,0.95)';
-      tooltip.style.color = '#fff';
-      tooltip.style.padding = '6px 9px';
-      tooltip.style.borderRadius = '4px';
-      tooltip.style.fontSize = '12px';
-      tooltip.style.fontFamily = "'Google Sans','Roboto',Arial,sans-serif";
-      tooltip.style.lineHeight = '1.35';
-      tooltip.style.maxWidth = '240px';
-      tooltip.style.zIndex = '10';
-      tooltip.style.boxShadow = '0 1px 4px rgba(0,0,0,0.3)';
-
+      tooltip.style.cssText = 'position:absolute;display:none;pointer-events:none;background:rgba(32,33,36,0.95);' +
+        "color:#fff;padding:6px 9px;border-radius:4px;font-size:12px;font-family:'Google Sans','Roboto',Arial,sans-serif;" +
+        'line-height:1.35;max-width:240px;z-index:10;box-shadow:0 1px 4px rgba(0,0,0,0.3);';
       container.appendChild(tooltip);
       element.appendChild(container);
 
       this._container = container;
       this._tooltip = tooltip;
-      this._lastData = null;
-      this._lastQR = null;
-      this._lastConfig = null;
+      this._lastData = null; this._lastQR = null; this._lastConfig = null;
 
       var self = this;
       var rerender = debounce(function () {
-        if (self._lastData) {
-          try {
-            var model = buildModel(self._lastData, self._lastQR, self._lastConfig || {});
-            if (model.error) { renderMessage(self._container, model.error); }
-            else { render(self._container, self._tooltip, self._lastConfig || {}, model); }
-          } catch (e) { renderMessage(self._container, 'Render error: ' + e.message); }
-        }
+        if (!self._lastData) { return; }
+        try {
+          var model = buildModel(self._lastData, self._lastQR, self._lastConfig || {});
+          if (model.error) { renderMessage(self._container, model.error); }
+          else { render(self._container, self._tooltip, self._lastConfig || {}, model); }
+        } catch (e) { renderMessage(self._container, 'Render error: ' + e.message); }
       }, 80);
 
       if (typeof ResizeObserver !== 'undefined') {
@@ -555,9 +587,7 @@
     },
 
     updateAsync: function (data, element, config, queryResponse, details, done) {
-      this._lastData = data;
-      this._lastQR = queryResponse;
-      this._lastConfig = config || {};
+      this._lastData = data; this._lastQR = queryResponse; this._lastConfig = config || {};
       try {
         var model = buildModel(data, queryResponse, this._lastConfig);
         if (model.error) { renderMessage(this._container, model.error); }
@@ -572,16 +602,12 @@
     destroy: function () {
       if (this._ro) { try { this._ro.disconnect(); } catch (e) {} this._ro = null; }
       if (this._winResize) { window.removeEventListener('resize', this._winResize); this._winResize = null; }
-      this._container = null;
-      this._tooltip = null;
-      this._lastData = null;
+      this._container = null; this._tooltip = null; this._lastData = null;
     }
   };
 
   if (typeof window !== 'undefined' && window.looker && window.looker.plugins && window.looker.plugins.visualizations) {
     window.looker.plugins.visualizations.add(VIS);
   }
-
-  // exposed for the local synthetic-data harness (no-op inside Looker)
   if (typeof window !== 'undefined') { window.__STEPPED_SANKEY__ = VIS; }
 })();

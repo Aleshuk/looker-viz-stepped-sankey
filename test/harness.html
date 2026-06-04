@@ -17,97 +17,111 @@
 <body>
   <header>
     <h1>Stepped Funnel Sankey — synthetic data harness</h1>
-    <p>Mounts the viz exactly as Looker would. Flow: order_status &rarr; product_category &rarr; production_status &rarr; print_house_name, weight = item count.</p>
+    <p id="caption"></p>
   </header>
   <div class="controls">
+    <label>Mode:
+      <select id="mode"><option value="edges">edges (delegation)</option><option value="stepped">stepped (PSP)</option></select>
+    </label>
     <label>Bucket %: <input id="bucket" type="number" value="5" min="0" max="50" step="1" style="width:54px" /></label>
     <label>Palette:
       <select id="palette"><option>looker</option><option>cool</option><option>warm</option><option>mono</option></select>
     </label>
     <label><input id="labels" type="checkbox" checked /> labels</label>
-    <label><input id="pcts" type="checkbox" checked /> %</label>
   </div>
   <div id="viz"></div>
 
   <script>
-    // ---- Stub the Looker viz API so the IIFE registers against it ----
     window.looker = { plugins: { visualizations: { add: function (spec) { window.__SPEC__ = spec; } } } };
   </script>
   <script src="../stepped_sankey.js"></script>
   <script>
-    // ---- synthetic data shaped like Looker's data + queryResponse ----
-    var DIMS = ['order_status', 'product_category', 'production_status', 'print_house_name'];
-    var MEASURE = 'item_count';
-
-    // hand-authored rows: [order_status, product_category, production_status, print_house, count]
-    var RAW = [
-      ['In Production', 'Apparel',   'Printed',  'PSP Berlin', 4200],
-      ['In Production', 'Apparel',   'Printing', 'PSP London', 1800],
-      ['In Production', 'Wall Art',  'Printed',  'PSP Berlin', 2600],
-      ['In Production', 'Wall Art',  'Printed',  'PSP NYC',    1500],
-      ['In Production', 'Cards',     'Printed',  'PSP London', 1300],
-      ['In Production', 'Cards',     'Queued',   'PSP Tokyo',  600],
-      ['In Production', 'Mugs',      'Printing', 'PSP NYC',    900],
-      ['In Production', 'Calendars', 'Queued',   'PSP Sydney', 250],
-      ['In Production', 'Calendars', 'Failed',   'PSP Riga',   60],
-      ['Shipped',       'Apparel',   'Printed',  'PSP Berlin', 3100],
-      ['Shipped',       'Apparel',   'Printed',  'PSP London', 1400],
-      ['Shipped',       'Wall Art',  'Printed',  'PSP NYC',    1700],
-      ['Shipped',       'Cards',     'Printed',  'PSP London', 1100],
-      ['Shipped',       'Mugs',      'Printed',  'PSP NYC',    800],
-      ['Shipped',       'Posters',   'Printed',  'PSP Berlin', 120],
-      ['Delivered',     'Apparel',   'Printed',  'PSP Berlin', 2200],
-      ['Delivered',     'Wall Art',  'Printed',  'PSP NYC',    1300],
-      ['Delivered',     'Cards',     'Printed',  'PSP London', 700],
-      ['Created',       'Apparel',   'Queued',   'PSP Berlin', 500],
-      ['Created',       'Stickers',  'Queued',   'PSP Riga',   90],
-      ['Cancelled',     'Mugs',      'Failed',   'PSP NYC',    140]
-    ];
-
     function cell(v) { return { value: v, rendered: (typeof v === 'number') ? v.toLocaleString('en-US') : String(v) }; }
 
-    function buildData() {
-      var data = [];
-      for (var i = 0; i < RAW.length; i++) {
-        var row = {};
-        for (var d = 0; d < DIMS.length; d++) { row[DIMS[d]] = cell(RAW[i][d]); }
-        row[MEASURE] = cell(RAW[i][4]);
-        data.push(row);
+    // ---- EDGES mode: real delegation transition edges (from query) ----
+    var EDGE_QR = {
+      fields: {
+        dimension_like: [ { name: 'from_transition', label_short: 'From' }, { name: 'to_transition', label_short: 'To' } ],
+        measure_like: [ { name: 'edge_count', label_short: 'Transitions' } ]
       }
-      return data;
+    };
+    var EDGES = [
+      ['Order created','Order created in GN',306498],
+      ['Order created in GN','Plate build triggered',306344],
+      ['Plate build triggered','Delegation fires',295469],
+      ['Delegation fires','Delegated order created',209872],
+      ['Delegation fires','Delegated order created in GN',73826],
+      ['Delegated order created','Delegated order created in GN',269360],
+      ['Delegated order created in GN','Plate uploaded',166172],
+      ['Delegated order created in GN','Batch release',98393],
+      ['Plate uploaded','Batch release',224215],
+      ['Batch release','Partner plate uploaded',286514],
+      ['Batch release','Tracking synced',93941],
+      ['Partner plate uploaded','Printed',27835],
+      ['Partner plate uploaded','Tracking synced',232002],
+      ['Tracking synced','Printed',322946],
+      ['Printed','Scanned',361004],
+      ['Printed','Failed',9800],
+      ['Printed','Cancelled',7400],
+      ['Scanned','Shipped',370695],
+      ['Shipped','Tracking synced',19295]
+    ];
+    function edgeData() {
+      return EDGES.map(function (e) { return { from_transition: cell(e[0]), to_transition: cell(e[1]), edge_count: cell(e[2]) }; });
     }
 
-    var queryResponse = {
+    // ---- STEPPED mode: PSP production flow ----
+    var STEP_DIMS = ['order_status','product_category','production_status','print_house_name'];
+    var STEP_QR = {
       fields: {
         dimension_like: [
           { name: 'order_status', label_short: 'Order Status' },
           { name: 'product_category', label_short: 'Product Category' },
           { name: 'production_status', label_short: 'Production Status' },
-          { name: 'print_house_name', label_short: 'Print House (PSP)' }
+          { name: 'print_house_name', label_short: 'Print House' }
         ],
         measure_like: [ { name: 'item_count', label_short: 'Item Count' } ]
       }
     };
+    var STEP_RAW = [
+      ['In Production','Apparel','Printed','PSP Berlin',4200],
+      ['In Production','Wall Art','Printed','PSP NYC',2600],
+      ['Shipped','Apparel','Printed','PSP Berlin',3100],
+      ['Shipped','Cards','Printed','PSP London',1100],
+      ['Delivered','Apparel','Printed','PSP Berlin',2200],
+      ['Cancelled','Mugs','Failed','PSP NYC',140]
+    ];
+    function stepData() {
+      return STEP_RAW.map(function (r) {
+        var row = {}; for (var d = 0; d < STEP_DIMS.length; d++) { row[STEP_DIMS[d]] = cell(r[d]); }
+        row.item_count = cell(r[4]); return row;
+      });
+    }
 
     var spec = window.__SPEC__;
     var el = document.getElementById('viz');
     spec.create(el, {});
 
     function draw() {
+      var mode = document.getElementById('mode').value;
+      document.getElementById('caption').textContent = mode === 'edges'
+        ? 'EDGES mode — delegation lifecycle: from_transition → to_transition, weight = transitions'
+        : 'STEPPED mode — order_status → product_category → production_status → print_house, weight = items';
       var config = {
+        input_mode: mode,
         bucket_pct: parseFloat(document.getElementById('bucket').value),
         palette: document.getElementById('palette').value,
         show_node_labels: document.getElementById('labels').checked,
-        show_percentages: document.getElementById('pcts').checked,
-        show_values: true
+        show_percentages: true, show_values: true
       };
-      spec.updateAsync(buildData(), el, config, queryResponse, {}, function () {});
+      if (mode === 'edges') { spec.updateAsync(edgeData(), el, config, EDGE_QR, {}, function () {}); }
+      else { spec.updateAsync(stepData(), el, config, STEP_QR, {}, function () {}); }
     }
 
-    document.getElementById('bucket').addEventListener('input', draw);
-    document.getElementById('palette').addEventListener('change', draw);
-    document.getElementById('labels').addEventListener('change', draw);
-    document.getElementById('pcts').addEventListener('change', draw);
+    ['mode','bucket','palette','labels'].forEach(function (id) {
+      document.getElementById(id).addEventListener('change', draw);
+      document.getElementById(id).addEventListener('input', draw);
+    });
     draw();
   </script>
 </body>
